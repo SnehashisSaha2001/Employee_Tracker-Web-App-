@@ -926,7 +926,6 @@
         }
     });
 
-    
     // Pre-populate admin data and always overwrite to avoid corruption
     initialAdminData.forEach(admin => {
         const adminProfile = {
@@ -941,13 +940,25 @@
         console.log(`Force-loaded admin profile: ${admin.adminId}`);
     });
 
+    // --- NEW: Check for persistent login session ---
+    const lastLoggedInRole = localStorage.getItem('lastLoggedInRole');
+    const lastLoggedInEmployeeId = localStorage.getItem('lastLoggedInEmployeeId');
 
-
-    showSection('login');
-    // Hide sidebar buttons until logged in
-    document.querySelectorAll('.sidebar button:not(#loginBtn)').forEach(btn => btn.style.display = 'none');
-    document.getElementById('loginBtn').style.display = 'block';
-    document.getElementById('logoutBtn').style.display = 'none';
+    if (lastLoggedInRole && lastLoggedInEmployeeId) {
+        currentUserRole = lastLoggedInRole;
+        currentEmployeeId = lastLoggedInEmployeeId;
+        // Retrieve the full profile to update sidebar details correctly
+        const userProfile = getUserProfile(currentEmployeeId);
+        updateSidebarProfile(userProfile.name, userProfile.employeeId, userProfile.photoUrl);
+        login(); // Call the login function to set up UI and navigate to appropriate section
+    } else {
+        showSection('login');
+        // Hide sidebar buttons until logged in
+        document.querySelectorAll('.sidebar button:not(#loginBtn)').forEach(btn => btn.style.display = 'none');
+        document.getElementById('loginBtn').style.display = 'block';
+        document.getElementById('logoutBtn').style.display = 'none';
+    }
+    // --- END NEW ---
 
     document.getElementById('login-role').addEventListener('change', function() {
         const passwordGroup = document.getElementById('password-group');
@@ -1162,6 +1173,11 @@
       document.getElementById('logoutBtn').style.display = 'block';
       document.querySelectorAll('.sidebar button:not(#loginBtn):not(#logoutBtn)').forEach(btn => btn.style.display = 'block');
 
+      // --- NEW: Save session to localStorage ---
+      localStorage.setItem('lastLoggedInRole', currentUserRole);
+      localStorage.setItem('lastLoggedInEmployeeId', currentEmployeeId);
+      // --- END NEW ---
+
       if (currentUserRole === 'admin') {
           document.getElementById('employeeManagementBtn').style.display = 'block';
           document.getElementById('adminProfileBtn').style.display = 'block';
@@ -1189,6 +1205,12 @@
       currentUserRole = null;
       currentEmployeeId = null;
       stopLocationTracking(); // Ensure location tracking stops on logout
+
+      // --- NEW: Clear session from localStorage ---
+      localStorage.removeItem('lastLoggedInRole');
+      localStorage.removeItem('lastLoggedInEmployeeId');
+      // --- END NEW ---
+
       showAlert('Logged out successfully!');
       showSection('login');
       document.querySelectorAll('.sidebar button:not(#loginBtn)').forEach(btn => btn.style.display = 'none');
@@ -1205,7 +1227,7 @@
   const customConfirmModal = document.getElementById('customConfirmModal');
   const confirmMessage = document.getElementById('confirmMessage');
   const confirmYesButton = document.getElementById('confirmYes');
-  const confirmNoButton = document.getElementById('confirmNo');
+  const confirmNoButton = document = document.getElementById('confirmNo');
   let confirmCallback = null;
 
   let watchId = null; // Global variable to hold the watchPosition ID
@@ -2748,5 +2770,510 @@
 </script>
 
 
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+
+// tracker integration script (script.js)
+// This script implements a configurable backend integration for your Tracker frontend.
+// It preserves the original UI flow and falls back to localStorage when backend is not available.
+//
+// CONFIGURE HERE:
+const CONFIG = {
+  API_BASE: "https://tracker-web-app-backend.onrender.com", // change to your Render service
+  USE_REMOTE: false, // set to true to enable remote backend calls
+  SOCKET_PATH: "/", // optional
+  AUTO_PUSH_LOCATION: true, // employees will push location via socket if true
+};
+let TOKEN = localStorage.getItem("tracker_token") || null;
+let CURRENT_ROLE = localStorage.getItem("lastLoggedInRole") || null;
+let CURRENT_EMPLOYEE_ID = localStorage.getItem("lastLoggedInEmployeeId") || null;
+let socket = null;
+
+// Utility - API request
+async function apiRequest(path, options = {}) {
+  if (!CONFIG.USE_REMOTE) throw new Error("Remote disabled");
+  const headers = options.headers || {};
+  if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
+  headers['Content-Type'] = 'application/json';
+  const res = await fetch(CONFIG.API_BASE + path, { ...options, headers });
+  const data = await res.json().catch(()=>({}));
+  if (!res.ok) throw new Error(data.error || 'API error');
+  return data;
+}
+
+// Initialize socket (used when remote is enabled)
+function initSocket() {
+  if (!CONFIG.USE_REMOTE) return;
+  if (!TOKEN) {
+    console.warn("No token for socket auth");
+  }
+  socket = io(CONFIG.API_BASE, { auth: { token: TOKEN }, path: CONFIG.SOCKET_PATH });
+  socket.on('connect', ()=> console.log('socket connected', socket.id));
+  socket.on('location:update', handleLocationUpdateRemote);
+  socket.on('task:create', handleTaskCreateRemote);
+  socket.on('task:update', handleTaskUpdateRemote);
+  socket.on('presence:online', p => console.log('presence online', p));
+  socket.on('presence:offline', p => console.log('presence offline', p));
+}
+
+// Remote handlers forward to existing UI update functions (if present)
+function handleLocationUpdateRemote(payload) {
+  console.log('remote location update', payload);
+  // If your original app has a function to handle incoming location updates, call it here.
+  // Example: onRemoteLocation(payload);
+  // For demo, append to locations div:
+  const el = document.getElementById('locations');
+  if (el) {
+    const d = document.createElement('div');
+    d.textContent = `[${new Date(payload.ts).toLocaleTimeString()}] ${payload.name||payload.user_id}: ${payload.lat},${payload.lng}`;
+    el.prepend(d);
+  }
+}
+function handleTaskCreateRemote(task){ console.log('task create', task); }
+function handleTaskUpdateRemote(task){ console.log('task update', task); }
+
+// LOGIN integration
+async function remoteLoginIfEnabled({ employeeIdInput, adminUsernameInput, passwordInput, mobileNumberInput, roleSelect }) {
+  if (!CONFIG.USE_REMOTE) throw new Error("Remote disabled");
+  // NOTE: Backend API expects email+password in my sample backend.
+  // Map frontend fields to backend payload. You need to adjust this mapping to match your backend.
+  let email = null;
+  if (roleSelect === 'employee') {
+    // using mobile number as email fallback: ensure backend can accept this or adapt accordingly
+    email = mobileNumberInput || (employeeIdInput + "@example.com");
+  } else {
+    email = (adminUsernameInput || adminUsernameInput+"@example.com");
+  }
+  const body = { email, password: passwordInput };
+  const data = await apiRequest('/api/auth/login', { method: 'POST', body: JSON.stringify(body) });
+  // backend returns { token, user: { id, org_id, role, name, email } }
+  TOKEN = data.token;
+  localStorage.setItem('tracker_token', TOKEN);
+  if (data.user?.role) CURRENT_ROLE = data.user.role;
+  localStorage.setItem('lastLoggedInRole', CURRENT_ROLE);
+  if (data.user?.id) { CURRENT_EMPLOYEE_ID = data.user.id; localStorage.setItem('lastLoggedInEmployeeId', CURRENT_EMPLOYEE_ID); }
+  initSocket();
+  return data;
+}
+
+// Override/processLogin to attempt remote then fallback to local
+const _orig_processLogin = window.processLogin;
+window.processLogin = async function(loginData) {
+  try {
+    if (CONFIG.USE_REMOTE) {
+      const res = await remoteLoginIfEnabled(loginData);
+      console.log('remote login success', res);
+      // Set UI as logged in using existing login() function if present
+      if (typeof window.login === 'function') {
+        // map currentEmployeeId to employeeId string if needed; backend id may be UUID.
+        window.currentEmployeeId = loginData.employeeIdInput || (res.user && res.user.name) || res.user?.id;
+        window.currentUserRole = res.user?.role || loginData.roleSelect;
+        localStorage.setItem('lastLoggedInRole', window.currentUserRole);
+        localStorage.setItem('lastLoggedInEmployeeId', window.currentEmployeeId);
+        window.login();
+      }
+      return;
+    }
+  } catch (e) {
+    console.error('remote login failed, falling back to local', e);
+  }
+  // Fallback to original behavior
+  if (typeof _orig_processLogin === 'function') return _orig_processLogin(loginData);
+  console.warn('No original processLogin found');
+};
+
+// Location push (when tracking is active in original app, call this function to forward to remote)
+async function pushLocationRemote({ lat, lng, accuracy, battery, ts }){
+  if (!CONFIG.USE_REMOTE || !TOKEN) return;
+  try {
+    // send via socket if connected
+    if (socket && socket.connected) {
+      socket.emit('location:push', { lat, lng, accuracy, battery, ts });
+      return;
+    }
+    // fallback to HTTP
+    await apiRequest('/api/locations', { method: 'POST', body: JSON.stringify({ lat, lng, accuracy, battery, ts }) });
+  } catch (e) {
+    console.error('pushLocationRemote failed', e);
+  }
+}
+
+// Monkeypatch startLocationTracking and stopLocationTracking so your app can call them as before
+const _orig_startLocationTracking = window.startLocationTracking;
+window.startLocationTracking = function() {
+  // call original to keep UI/behavior
+  if (typeof _orig_startLocationTracking === 'function') _orig_startLocationTracking();
+  if (CONFIG.USE_REMOTE && CONFIG.AUTO_PUSH_LOCATION) {
+    // start watch and emit via socket
+    if (navigator.geolocation) {
+      window.__tracker_watchId = navigator.geolocation.watchPosition(pos => {
+        const payload = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, ts: new Date().toISOString(), battery: null };
+        pushLocationRemote(payload);
+      }, err => console.error('geo err', err), { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
+      console.log('remote location watch started', window.__tracker_watchId);
+    }
+  }
+};
+const _orig_stopLocationTracking = window.stopLocationTracking;
+window.stopLocationTracking = function() {
+  if (typeof _orig_stopLocationTracking === 'function') _orig_stopLocationTracking();
+  if (window.__tracker_watchId) {
+    navigator.geolocation.clearWatch(window.__tracker_watchId);
+    window.__tracker_watchId = null;
+    console.log('remote location watch stopped');
+  }
+};
+
+// Data sync helpers for daily activity and followups: try remote, fallback to localStorage
+async function getDailyActivityRecordsRemote() {
+  if (!CONFIG.USE_REMOTE) throw new Error('remote disabled');
+  const res = await apiRequest('/api/locations/recent?sinceMinutes=1440', { method: 'GET' });
+  // Convert remote format to local structure expected by UI if needed
+  if (Array.isArray(res.locations)) {
+    return res.locations.map(l => ({
+      id: 'LOC-' + (l.id||Math.random().toString(36).substr(2,6)),
+      employeeId: l.user_id || l.user_id,
+      timestamp: l.ts || l.ts,
+      type: 'Location',
+      location: l.name || '',
+      lat: l.lat,
+      lng: l.lng,
+      mapLink: `https://www.openstreetmap.org/?mlat=${l.lat}&mlon=${l.lng}`,
+      details: ''
+    }));
+  }
+  return [];
+}
+const _orig_getDailyActivityRecords = window.getDailyActivityRecords;
+window.getDailyActivityRecords = async function() {
+  if (CONFIG.USE_REMOTE) {
+    try {
+      return await getDailyActivityRecordsRemote();
+    } catch (e) { console.error('getDailyActivityRecords remote failed', e); }
+  }
+  if (typeof _orig_getDailyActivityRecords === 'function') return _orig_getDailyActivityRecords();
+  return [];
+};
+
+// Save followups remote example (if your backend supports it)
+async function saveFollowUpsRemote(followups) {
+  if (!CONFIG.USE_REMOTE) throw new Error('remote disabled');
+  // backend endpoint for followups not defined in example backend; adjust as needed.
+  try {
+    await apiRequest('/api/followups', { method: 'POST', body: JSON.stringify({ followups }) });
+    return true;
+  } catch (e) { console.error('saveFollowUpsRemote failed', e); return false; }
+}
+const _orig_saveFollowUps = window.saveFollowUps;
+window.saveFollowUps = async function(followups) {
+  if (CONFIG.USE_REMOTE) {
+    try { const ok = await saveFollowUpsRemote(followups); if (ok) return; } catch(e){}
+  }
+  if (typeof _orig_saveFollowUps === 'function') return _orig_saveFollowUps(followups);
+};
+
+// Auto-init when included
+(function autoInit(){
+  if (CONFIG.USE_REMOTE) {
+    // attempt to init from saved token
+    TOKEN = localStorage.getItem('tracker_token') || TOKEN;
+    initSocket();
+  }
+  // Wire login button in split demo
+  const loginBtn = document.getElementById('login-btn');
+  if (loginBtn) loginBtn.addEventListener('click', ()=>{
+    const loginData = {
+      employeeIdInput: document.getElementById('login-employee-id')?.value?.trim(),
+      adminUsernameInput: '',
+      passwordInput: document.getElementById('login-password')?.value || document.getElementById('login-password')?.value,
+      mobileNumberInput: document.getElementById('login-mobile-number')?.value?.trim(),
+      roleSelect: document.getElementById('login-role')?.value
+    };
+    // call original processLogin (which we monkeypatched to attempt remote login first)
+    if (typeof window.processLogin === 'function') window.processLogin(loginData);
+    else console.warn('processLogin not found on page');
+  });
+  const logoutBtn = document.getElementById('logout-btn');
+  if (logoutBtn) logoutBtn.addEventListener('click', ()=>{ if (typeof window.logout === 'function') window.logout(); else location.reload(); });
+})();
+
+// Export helpers for debugging
+window._trackerConfig = CONFIG;
+window._trackerApiRequest = apiRequest;
+window._trackerInitSocket = initSocket;
+
+  </script>
+
+  <!-- Socket.IO client -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+  <!-- Backend API wrapper -->
+  <script>
+// TrackerAPI inline
+(function(){
+  let apiBase = "https://YOUR-BACKEND-URL";
+  let token = localStorage.getItem("tracker_token") || null;
+  let currentUser = null;
+  let socket = null;
+
+  function setApiBase(url){ apiBase = url; }
+  function getToken(){ return token; }
+  function getCurrentUser(){ return currentUser; }
+
+  function connectSocket() {
+    if (!token || typeof io === "undefined") return;
+    if (socket && socket.connected) return socket;
+    socket = io(apiBase, { auth: { token } });
+    socket.on("connect", () => console.log("✅ Socket connected"));
+    return socket;
+  }
+  function disconnectSocket(){
+    if (socket) socket.disconnect();
+    socket = null;
+  }
+
+  async function login({ employeeId, mobile, password }) {
+    const res = await fetch(apiBase + "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ employeeId, mobile, password })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Login failed");
+    token = data.token;
+    localStorage.setItem("tracker_token", token);
+    currentUser = data.user;
+    connectSocket();
+    return { user: currentUser, token };
+  }
+  function logout(){
+    token = null;
+    currentUser = null;
+    localStorage.removeItem("tracker_token");
+    disconnectSocket();
+  }
+
+  async function fetchEmployees() {
+    try {
+      const res = await fetch(apiBase + "/api/users", {
+        headers: { "Authorization": "Bearer " + token }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      localStorage.setItem("backup_employees", JSON.stringify(data.users));
+      return data.users;
+    } catch (err) {
+      return JSON.parse(localStorage.getItem("backup_employees") || "[]");
+    }
+  }
+
+  async function addEmployee({ orgId, name, employeeId, mobile, password, email, role = "employee", photoUrl }) {
+    const res = await fetch(apiBase + "/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ orgId, name, employeeId, mobile, password, email, role, photoUrl })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Register failed");
+    return data.user;
+  }
+
+  async function checkIn({ lat, lng, accuracy, battery, ts }) {
+    try {
+      const res = await fetch(apiBase + "/api/locations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+        body: JSON.stringify({ lat, lng, accuracy, battery, ts })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      return data.location;
+    } catch (err) {
+      const logs = JSON.parse(localStorage.getItem("backup_daily") || "[]");
+      logs.push({ lat, lng, accuracy, battery, ts: new Date().toISOString() });
+      localStorage.setItem("backup_daily", JSON.stringify(logs));
+      return null;
+    }
+  }
+
+  async function loadDailyLogs({ sinceMinutes = 180 } = {}) {
+    try {
+      const res = await fetch(apiBase + "/api/locations/recent?sinceMinutes=" + encodeURIComponent(sinceMinutes), {
+        headers: { "Authorization": "Bearer " + token }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      localStorage.setItem("backup_daily", JSON.stringify(data.locations));
+      return data.locations;
+    } catch (err) {
+      return JSON.parse(localStorage.getItem("backup_daily") || "[]");
+    }
+  }
+
+  async function addFollowUp({ title, description, assigned_to }) {
+    const res = await fetch(apiBase + "/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ title, description, assigned_to })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Create task failed");
+    return data.task;
+  }
+
+  async function loadFollowups() {
+    try {
+      const res = await fetch(apiBase + "/api/tasks", {
+        headers: { "Authorization": "Bearer " + token }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      localStorage.setItem("backup_followups", JSON.stringify(data.tasks));
+      return data.tasks;
+    } catch (err) {
+      return JSON.parse(localStorage.getItem("backup_followups") || "[]");
+    }
+  }
+
+  async function updateProfile(updates) {
+    try {
+      const res = await fetch(apiBase + "/api/users/me", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+        body: JSON.stringify(updates)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      currentUser = data.user;
+      return data.user;
+    } catch (err) {
+      localStorage.setItem("backup_profile", JSON.stringify(updates));
+      return null;
+    }
+  }
+
+  window.TrackerAPI = {
+    setApiBase, getToken, getCurrentUser,
+    connectSocket, disconnectSocket,
+    login, logout,
+    fetchEmployees, addEmployee,
+    checkIn, loadDailyLogs,
+    addFollowUp, loadFollowups,
+    updateProfile
+  };
+})();
+
+</script>
+
+  <script>
+    const BASE_URL = "https://YOUR-BACKEND-URL";
+
+    // --- LOGIN ---
+    async function handleLogin() {
+      const employeeId = document.getElementById("login-employee-id").value.trim();
+      const mobile = document.getElementById("login-mobile-number").value.trim();
+      const password = document.getElementById("login-password").value;
+      try {
+        const { user } = await TrackerAPI.login({ employeeId, mobile, password });
+        alert("✅ Logged in as " + user.name);
+        showDashboard();
+      } catch (err) {
+        alert("❌ Login failed: " + err.message);
+      }
+    }
+
+    // --- EMPLOYEES ---
+    async function loadEmployees() {
+      const employees = await TrackerAPI.fetchEmployees();
+      renderEmployeeList(employees);
+    }
+
+    async function addEmployeeFromForm() {
+      const employee = {
+        orgId: window.currentUser?.orgId,
+        name: document.getElementById("new-employee-name").value.trim(),
+        employeeId: document.getElementById("new-employee-id").value.trim(),
+        mobile: document.getElementById("new-employee-mobile").value.trim(),
+        password: document.getElementById("new-employee-password").value,
+        email: document.getElementById("new-employee-email").value.trim(),
+        role: document.getElementById("new-employee-role").value,
+        photoUrl: document.getElementById("new-employee-photo").value.trim()
+      };
+      const added = await TrackerAPI.addEmployee(employee);
+      if (added) {
+        alert("✅ Employee added");
+        loadEmployees();
+      } else {
+        alert("❌ Failed to add employee");
+      }
+    }
+
+    // --- DAILY ACTIVITY ---
+    async function simulateCheckIn() {
+      if (!navigator.geolocation) {
+        alert("❌ Geolocation not supported");
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+        const { latitude, longitude, accuracy } = pos.coords;
+        const battery = navigator.getBattery ? (await navigator.getBattery()).level * 100 : null;
+        const result = await TrackerAPI.checkIn({ lat: latitude, lng: longitude, accuracy, battery });
+        if (result) {
+          alert("✅ Check-in saved");
+          loadDailyActivity();
+        } else {
+          alert("⚠️ Check-in saved locally (offline)");
+        }
+      });
+    }
+
+    async function loadDailyActivity() {
+      const logs = await TrackerAPI.loadDailyLogs();
+      renderDailyActivity(logs);
+    }
+
+    // --- FOLLOWUPS ---
+    async function addFollowUpFromForm() {
+      const title = document.getElementById("followup-title").value.trim();
+      const description = document.getElementById("followup-description").value.trim();
+      const task = await TrackerAPI.addFollowUp({ title, description });
+      if (task) {
+        alert("✅ Follow-up added");
+        loadFollowups();
+      } else {
+        alert("⚠️ Follow-up saved locally (offline)");
+      }
+    }
+
+    async function loadFollowups() {
+      const tasks = await TrackerAPI.loadFollowups();
+      renderFollowupList(tasks);
+    }
+
+    // --- PROFILE ---
+    async function updateProfileFromForm() {
+      const updates = {
+        name: document.getElementById("profile-name").value.trim(),
+        mobile: document.getElementById("profile-mobile").value.trim(),
+        photoUrl: document.getElementById("profile-photo").value.trim()
+      };
+      const updated = await TrackerAPI.updateProfile(updates);
+      if (updated) {
+        alert("✅ Profile updated");
+      } else {
+        alert("⚠️ Profile update saved locally (offline)");
+      }
+    }
+
+    // Hook login form submit
+    const loginForm = document.getElementById("login-form");
+    if (loginForm) {
+      loginForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        handleLogin();
+      });
+    }
+  </script>
 </body>
+
 </html>
